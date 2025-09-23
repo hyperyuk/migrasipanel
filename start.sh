@@ -1,54 +1,68 @@
 #!/bin/bash
+# ==========================================
+# Script Migrasi Pterodactyl Panel & Wings
+# By Ryunitro (Final Version)
+# ==========================================
 
-echo "=== Migrasi Panel Pterodactyl ==="
+echo "======================================="
+echo "      Script Migrasi Pterodactyl"
+echo "======================================="
 
-# Input yang dibutuhkan
+# Input VPS lama
 read -p "Masukkan IP VPS Lama: " OLD_IP
-read -p "Masukkan User VPS Lama (biasanya root): " OLD_USER
+read -p "Masukkan User VPS Lama (default: root): " OLD_USER
+OLD_USER=${OLD_USER:-root}
 read -sp "Masukkan Password VPS Lama: " OLD_PASS
 echo
 read -p "Masukkan Nama Database Pterodactyl (default: panel): " DB_NAME
 DB_NAME=${DB_NAME:-panel}
+read -sp "Masukkan Password MySQL root VPS Baru: " MYSQL_PASS
+echo
 read -p "Masukkan Domain untuk Panel (misal: panel.domainkamu.com): " DOMAIN
 
-# Folder utama pterodactyl
-PTERO_PATH="/var/www/pterodactyl"
+# Opsi migrasi
+echo "Pilih opsi migrasi:"
+echo "1. Migrasi Panel saja"
+echo "2. Migrasi Wings saja"
+echo "3. Migrasi Panel + Wings"
+read -p "Masukkan pilihan (1/2/3): " choice
 
-# Install dependensi di VPS baru
-echo "[+] Install dependensi (zip, sshpass, mariadb-client, nginx, certbot)..."
+# Folder utama
+BACKUP_DIR="/root/migrasi"
+PTERO_PATH="/var/www/pterodactyl"
+mkdir -p $BACKUP_DIR
+
+# Install dependensi
+echo "[+] Install dependensi..."
 apt update -y && apt install -y sshpass zip mariadb-client nginx certbot python3-certbot-nginx
 
-# Backup file & database di VPS lama
-echo "[+] Backup database dan file di VPS lama..."
-sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP " \
-    mysqldump -u root -p$OLD_PASS $DB_NAME > /root/ptero.sql && \
-    cd /var/www && tar -czf /root/ptero-files.tar.gz pterodactyl"
+# Auto detect PHP-FPM socket
+PHP_SOCK=$(ls /var/run/php/php*-fpm.sock | head -n1)
 
-# Copy backup ke VPS baru
-echo "[+] Transfer backup ke VPS baru..."
-sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/ptero.sql /root/
-sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/ptero-files.tar.gz /root/
+# === MIGRASI PANEL ===
+migrasi_panel() {
+    echo "[*] Migrasi Panel..."
+    sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP " \
+        mysqldump -u root -p$OLD_PASS $DB_NAME > /root/panel.sql && \
+        cd /var/www && tar -czf /root/panel-files.tar.gz pterodactyl"
 
-# Restore file
-echo "[+] Restore file ke VPS baru..."
-mkdir -p /var/www
-tar -xzf /root/ptero-files.tar.gz -C /var/www/
+    sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/panel.sql $BACKUP_DIR/
+    sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/panel-files.tar.gz $BACKUP_DIR/
 
-# Perbaiki permission
-chown -R www-data:www-data $PTERO_PATH
-chmod -R 755 $PTERO_PATH
+    mkdir -p /var/www
+    tar -xzf $BACKUP_DIR/panel-files.tar.gz -C /var/www/
 
-# Buat database jika belum ada
-echo "[+] Membuat database jika belum ada..."
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+    chown -R www-data:www-data $PTERO_PATH
+    chmod -R 755 $PTERO_PATH
 
-# Restore database
-echo "[+] Restore database..."
-mysql -u root -p $DB_NAME < /root/ptero.sql
+    echo "[+] Membuat database jika belum ada..."
+    mysql -u root -p$MYSQL_PASS -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
 
-# Buat config Nginx
-echo "[+] Membuat konfigurasi nginx..."
-cat > /etc/nginx/sites-available/pterodactyl.conf <<EOL
+    echo "[+] Restore database..."
+    mysql -u root -p$MYSQL_PASS $DB_NAME < $BACKUP_DIR/panel.sql
+
+    echo "[+] Membuat konfigurasi nginx..."
+    cat > /etc/nginx/sites-available/pterodactyl.conf <<EOL
 server {
     listen 80;
     server_name $DOMAIN;
@@ -65,7 +79,7 @@ server {
 
     location ~ \.php\$ {
         fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock; # sesuaikan versi PHP
+        fastcgi_pass unix:$PHP_SOCK;
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
@@ -84,14 +98,51 @@ server {
 }
 EOL
 
-ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
-nginx -t && systemctl restart nginx
+    ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+    nginx -t && systemctl restart nginx
 
-# Pasang SSL
-echo "[+] Pasang SSL Let's Encrypt..."
-certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || true
+    echo "[+] Pasang SSL Let's Encrypt..."
+    certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || true
 
-echo "=== Migrasi selesai! ==="
-echo "Sekarang ubah DNS A record di Cloudflare:"
-echo "$DOMAIN → IP VPS baru ini"
+    echo "[✓] Migrasi Panel selesai!"
+}
+
+# === MIGRASI WINGS ===
+migrasi_wings() {
+    echo "[*] Migrasi Wings..."
+    sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP " \
+        tar -czf /root/wings-files.tar.gz /etc/pterodactyl /var/lib/pterodactyl"
+
+    sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/wings-files.tar.gz $BACKUP_DIR/
+
+    tar -xzf $BACKUP_DIR/wings-files.tar.gz -C /
+
+    systemctl daemon-reexec
+    systemctl enable --now wings
+
+    echo "[✓] Migrasi Wings selesai!"
+}
+
+# Eksekusi sesuai pilihan
+case $choice in
+    1)
+        migrasi_panel
+        ;;
+    2)
+        migrasi_wings
+        ;;
+    3)
+        migrasi_panel
+        migrasi_wings
+        ;;
+    *)
+        echo "Pilihan tidak valid!"
+        exit 1
+        ;;
+esac
+
+echo "======================================="
+echo " Migrasi selesai!"
 echo "Cek config database di: $PTERO_PATH/.env"
+echo "Pastikan DNS domain $DOMAIN sudah mengarah ke IP VPS baru."
+echo "======================================="
