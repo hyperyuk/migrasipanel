@@ -1,51 +1,37 @@
 #!/bin/bash
-# ==========================================
-# Script Reset VPS ke kondisi Kosongan
-# By Ryunitro
-# ==========================================
+# VPS Wipe Script (Ubuntu/Debian)
+# Gunakan dengan hati-hati!
 
-echo "======================================="
-echo "   WARNING!!! VPS AKAN DIRESET TOTAL   "
-echo " Semua data, website, database, config "
-echo "            akan dihapus!              "
-echo "======================================="
-read -p "Ketik 'YA' untuk lanjut: " confirm
-
-if [[ "$confirm" != "YA" ]]; then
-    echo "Dibatalkan."
-    exit 1
+echo "=== VPS CLEANER - Semua data akan hilang! ==="
+read -p "Apakah kamu yakin ingin melanjutkan? (y/N): " confirm
+if [[ "$confirm" != "y" ]]; then
+  echo "Dibatalkan."
+  exit 1
 fi
 
-# Update dulu
-apt update -y
+echo "[1/6] Hapus web server & database..."
+apt-get purge -y nginx* apache2* mysql* mariadb* postgresql* php* nodejs* docker* redis* mongodb* vsftpd* proftpd*
 
-echo "[*] Menghapus layanan umum (nginx, mysql, docker, wings, pterodactyl, dll)..."
-apt purge -y nginx* mysql* mariadb* php* apache2* docker* nodejs* redis* certbot* ufw
-apt autoremove -y
-apt clean
+echo "[2/6] Hapus direktori web & config..."
+rm -rf /var/www/* /etc/nginx /etc/apache2 /etc/mysql /etc/postgresql /etc/php /etc/letsencrypt
 
-echo "[*] Menghapus file web & konfigurasi..."
-rm -rf /var/www/*
-rm -rf /etc/nginx/*
-rm -rf /etc/mysql/*
-rm -rf /etc/pterodactyl
-rm -rf /var/lib/pterodactyl
-rm -rf /root/migrasi
-rm -rf /etc/letsencrypt
+echo "[3/6] Hapus user non-root..."
+for user in $(awk -F: '$3 >= 1000 {print $1}' /etc/passwd); do
+    if [[ "$user" != "root" ]]; then
+        userdel -r "$user"
+    fi
+done
 
-echo "[*] Reset firewall..."
-ufw disable >/dev/null 2>&1
-iptables -F
-iptables -X
+echo "[4/6] Bersihkan paket & cache..."
+apt-get autoremove -y
+apt-get autoclean -y
+apt-get clean
 
-echo "[*] Membersihkan log..."
-rm -rf /var/log/*
+echo "[5/6] Bersihkan log..."
+find /var/log -type f -delete
 
-echo "[*] Membersihkan cache apt..."
-rm -rf /var/lib/apt/lists/*
-apt update -y
+echo "[6/6] Reset motd & banner..."
+echo "Welcome to a clean VPS" > /etc/motd
 
-echo "======================================="
-echo " VPS sudah kosong (semi fresh install)."
-echo " Saran: reboot VPS untuk hasil maksimal."
-echo "======================================="
+echo "=== VPS sudah dikosongkan. Tapi OS tetap ada. ==="
+echo "Kalau mau benar-benar fresh 100%, lakukan reinstall OS dari panel provider."
