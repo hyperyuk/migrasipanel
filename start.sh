@@ -2,6 +2,13 @@
 
 echo "=== Migrasi Panel Pterodactyl ==="
 
+# Pilih versi Ubuntu
+echo "Pilih versi Ubuntu VPS baru:"
+echo "1) Ubuntu 20.04 (MariaDB)"
+echo "2) Ubuntu 22.04 (MariaDB)"
+echo "3) Ubuntu 24.04 (MySQL)"
+read -p "Masukkan pilihan (1/2/3): " UBUNTU_VER
+
 # Input yang dibutuhkan
 read -p "Masukkan IP VPS Lama: " OLD_IP
 read -p "Masukkan User VPS Lama (biasanya root): " OLD_USER
@@ -14,9 +21,36 @@ read -p "Masukkan Domain untuk Panel (misal: panel.domainkamu.com): " DOMAIN
 # Folder utama pterodactyl
 PTERO_PATH="/var/www/pterodactyl"
 
-# Install dependensi di VPS baru
-echo "[+] Install dependensi (zip, sshpass, mariadb-client, nginx, certbot)..."
-apt update -y && apt install -y sshpass zip mariadb-client nginx certbot python3-certbot-nginx
+echo "[+] Update VPS & Install dependensi..."
+
+if [[ $UBUNTU_VER == "1" || $UBUNTU_VER == "2" ]]; then
+    # Ubuntu 20/22 pakai MariaDB
+    apt update -y && apt upgrade -y
+    apt install -y sshpass zip mariadb-server mariadb-client nginx certbot python3-certbot-nginx ufw
+    systemctl enable mariadb
+    systemctl start mariadb
+    DB_SERVICE="mariadb"
+    MYSQL_BIN="mysql"
+elif [[ $UBUNTU_VER == "3" ]]; then
+    # Ubuntu 24 pakai MySQL
+    apt update -y && apt upgrade -y
+    apt install -y sshpass zip mysql-server mysql-client nginx certbot python3-certbot-nginx ufw
+    systemctl enable mysql
+    systemctl start mysql
+    DB_SERVICE="mysql"
+    MYSQL_BIN="mysql"
+else
+    echo "Pilihan tidak valid!"
+    exit 1
+fi
+
+# Setup firewall UFW
+echo "[+] Konfigurasi UFW..."
+ufw allow OpenSSH
+ufw allow http
+ufw allow https
+ufw allow 3306/tcp
+ufw --force enable
 
 # Backup file & database di VPS lama
 echo "[+] Backup database dan file di VPS lama..."
@@ -39,12 +73,12 @@ chown -R www-data:www-data $PTERO_PATH
 chmod -R 755 $PTERO_PATH
 
 # Buat database jika belum ada
-echo "[+] Membuat database jika belum ada..."
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+echo "[+] Membuat database..."
+$MYSQL_BIN -u root -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
 
 # Restore database
 echo "[+] Restore database..."
-mysql -u root -p $DB_NAME < /root/ptero.sql
+$MYSQL_BIN -u root $DB_NAME < /root/ptero.sql
 
 # Buat config Nginx
 echo "[+] Membuat konfigurasi nginx..."
