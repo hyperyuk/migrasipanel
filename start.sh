@@ -14,21 +14,9 @@ read -p "Masukkan Domain untuk Panel (misal: panel.domainkamu.com): " DOMAIN
 # Folder utama pterodactyl
 PTERO_PATH="/var/www/pterodactyl"
 
-echo "[+] Update & upgrade VPS baru..."
-apt update -y && apt upgrade -y
-
 # Install dependensi di VPS baru
-echo "[+] Install dependensi (zip, sshpass, mariadb-client, nginx, certbot, ufw)..."
-apt install -y sshpass zip mariadb-client nginx certbot python3-certbot-nginx ufw php php-fpm php-mysql php-cli php-gd php-curl php-mbstring php-bcmath php-xml unzip tar git
-
-# Atur firewall UFW otomatis
-echo "[+] Setup UFW firewall..."
-ufw allow OpenSSH
-ufw allow http
-ufw allow https
-ufw allow 2022     # default Wings panel Pterodactyl
-ufw allow 8080     # contoh port node (opsional)
-ufw --force enable
+echo "[+] Install dependensi (zip, sshpass, mariadb-client, nginx, certbot)..."
+apt update -y && apt install -y sshpass zip mariadb-client nginx certbot python3-certbot-nginx
 
 # Backup file & database di VPS lama
 echo "[+] Backup database dan file di VPS lama..."
@@ -105,6 +93,5 @@ certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || tru
 
 echo "=== Migrasi selesai! ==="
 echo "Sekarang ubah DNS A record di Cloudflare:"
-echo "   $DOMAIN → IP VPS baru ini"
+echo "$DOMAIN → IP VPS baru ini"
 echo "Cek config database di: $PTERO_PATH/.env"
-echo "Firewall UFW sudah diaktifkan."
