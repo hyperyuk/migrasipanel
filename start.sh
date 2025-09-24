@@ -14,9 +14,17 @@ read -p "Masukkan Domain Panel (contoh: panel.domain.com): " NEW_DOMAIN
 BACKUP_DIR="/root/pterodactyl-backup"
 mkdir -p $BACKUP_DIR
 
-echo "=== Instal dependency di VPS baru ==="
-apt update -y
-apt install -y sshpass rsync mariadb-server nginx redis-server php-cli unzip curl
+echo "=== Update & Install dependency di VPS baru ==="
+apt update -y && apt upgrade -y
+apt install -y sshpass rsync mariadb-server nginx redis-server php-cli unzip curl ufw php8.1-fpm php8.1-mysql php8.1-gd php8.1-mbstring php8.1-bcmath php8.1-xml php8.1-curl
+
+echo "=== Setup UFW Firewall ==="
+ufw allow 22/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 3306/tcp
+ufw --force enable
+echo "=== Firewall Aktif ==="
 
 echo "=== Ambil backup dari VPS lama ==="
 sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP "mysqldump -u root -p panel > /root/panel.sql"
@@ -64,9 +72,10 @@ server {
 }
 EOL
 
-ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
-systemctl restart nginx
+ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+nginx -t && systemctl restart nginx
 systemctl restart php8.1-fpm
 
 echo "=== Migrasi selesai! ==="
 echo "Akses panel di: http://$NEW_DOMAIN"
+echo "Pastikan domain diarahkan ke IP VPS baru."
