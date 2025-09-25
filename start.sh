@@ -1,6 +1,7 @@
 #!/bin/bash
+set -e
 
-echo "=== Migrasi Pterodactyl Panel & Wings ==="
+echo "=== Migrasi Pterodactyl Panel + Wings ==="
 
 # Input
 read -p "Masukkan IP VPS Lama: " OLD_IP
@@ -11,45 +12,42 @@ echo
 read -p "Masukkan Domain Panel Baru (atau lama): " PANEL_DOMAIN
 read -p "Masukkan Domain Node Baru (atau lama): " NODE_DOMAIN
 
-# Update sistem
+echo "[1/6] Update VPS baru..."
 apt update -y && apt upgrade -y
-apt install -y sshpass rsync curl gnupg2 ca-certificates lsb-release software-properties-common unzip
+apt install -y sshpass rsync curl gnupg2 ca-certificates lsb-release software-properties-common unzip mariadb-server mariadb-client redis-server nginx certbot python3-certbot-nginx
 
-echo "[1/5] Backup data & database dari VPS Lama..."
-sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP "mysqldump -u root -p --all-databases > /root/panel_db.sql"
+echo "[2/6] Ambil file panel & config dari VPS lama..."
 sshpass -p "$OLD_PASS" rsync -avz --progress $OLD_USER@$OLD_IP:/var/www/pterodactyl/ /root/panel_files/
 sshpass -p "$OLD_PASS" rsync -avz --progress $OLD_USER@$OLD_IP:/etc/pterodactyl/ /root/wings_config/
+sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP "mysqldump -u root --all-databases > /root/panel_db.sql"
 sshpass -p "$OLD_PASS" rsync -avz --progress $OLD_USER@$OLD_IP:/root/panel_db.sql /root/
 
-echo "[2/5] Install dependency di VPS baru..."
-# MariaDB
-apt install -y mariadb-server mariadb-client
-systemctl enable --now mariadb
-
-# PHP + ext
-apt install -y php8.2 php8.2-cli php8.2-gd php8.2-mysql php8.2-mbstring php8.2-bcmath php8.2-xml php8.2-curl php8.2-zip composer unzip tar
-
-# Redis
-apt install -y redis-server
-
-# NodeJS terbaru
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt install -y nodejs
-
-# Nginx
-apt install -y nginx certbot python3-certbot-nginx
-
-echo "[3/5] Restore database & file..."
-mysql < /root/panel_db.sql
+echo "[3/6] Restore panel files..."
 mkdir -p /var/www/pterodactyl
 rsync -av /root/panel_files/ /var/www/pterodactyl/
 chown -R www-data:www-data /var/www/pterodactyl
 
-# Restore wings config
-mkdir -p /etc/pterodactyl
-rsync -av /root/wings_config/ /etc/pterodactyl/
+echo "[4/6] Setup database..."
+mysql -u root <<EOF
+DROP DATABASE IF EXISTS panel;
+CREATE DATABASE panel;
+EOF
 
-echo "[4/5] Konfigurasi Nginx + SSL..."
+# Baca user & password dari .env
+DB_USER=$(grep DB_USERNAME /var/www/pterodactyl/.env | cut -d '=' -f2)
+DB_PASS=$(grep DB_PASSWORD /var/www/pterodactyl/.env | cut -d '=' -f2)
+
+mysql -u root <<EOF
+DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';
+CREATE USER '$DB_USER'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON panel.* TO '$DB_USER'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
+
+# Import DB lama
+mysql -u root panel < /root/panel_db.sql || true
+
+echo "[5/6] Konfigurasi Nginx + SSL..."
 cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
 server {
     listen 80;
@@ -78,13 +76,20 @@ server {
 }
 EOF
 
-ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
 nginx -t && systemctl reload nginx
 
-# SSL
-certbot --nginx -d $PANEL_DOMAIN -n --agree-tos --register-unsafely-without-email
+# SSL otomatis
+certbot --nginx -d $PANEL_DOMAIN -n --agree-tos --register-unsafely-without-email || true
 
-echo "[5/5] Setup Wings service..."
+echo "[6/6] Setup Wings..."
+# Install Wings binary terbaru
+curl -L https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64 -o /usr/bin/wings
+chmod +x /usr/bin/wings
+
+mkdir -p /etc/pterodactyl
+rsync -av /root/wings_config/ /etc/pterodactyl/
+
 cat > /etc/systemd/system/wings.service <<EOF
 [Unit]
 Description=Pterodactyl Wings Daemon
@@ -107,6 +112,7 @@ EOF
 systemctl daemon-reload
 systemctl enable --now wings
 
-echo "=== Migrasi selesai! ==="
+echo "=== Migrasi Selesai ==="
 echo "Panel: https://$PANEL_DOMAIN"
 echo "Node: https://$NODE_DOMAIN"
+echo "Silakan jalankan: cd /var/www/pterodactyl && php artisan p:user:make"
