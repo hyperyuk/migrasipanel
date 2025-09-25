@@ -1,97 +1,67 @@
 #!/bin/bash
 set -e
 
-echo "=== Migrasi Panel Pterodactyl ==="
+echo "=== MIGRASI PANEL PTERODACTYL ==="
 
-# === INPUT DARI USER ===
-read -p "Masukkan IP VPS Lama: " OLD_IP
-read -p "Masukkan User VPS Lama (default: root): " OLD_USER
-OLD_USER=${OLD_USER:-root}
-read -sp "Masukkan Password VPS Lama: " OLD_PASS
+# ======================
+# INPUT USER
+# ======================
+read -p "IP VPS Lama: " OLD_IP
+read -p "Username VPS Lama (biasanya root): " OLD_USER
+read -sp "Password VPS Lama: " OLD_PASS
 echo
-read -p "Masukkan Domain Baru (ex: panel.domain.com): " NEW_DOMAIN
-read -p "Masukkan MySQL root password baru: " MYSQL_PASS
+read -p "Domain Panel Baru (atau lama): " PANEL_DOMAIN
+read -p "Domain Node/Wings Baru (atau lama): " NODE_DOMAIN
 
-# === UPDATE SISTEM & INSTALL DEPENDENSI ===
-apt update -y
-apt upgrade -y
-apt install -y curl wget unzip tar gnupg lsb-release ca-certificates apt-transport-https software-properties-common ufw
+# ======================
+# UPDATE & INSTALL TOOLS
+# ======================
+apt update -y && apt upgrade -y
+apt install -y sshpass rsync curl unzip git gnupg2 ca-certificates lsb-release apt-transport-https software-properties-common \
+ mariadb-server redis-server nginx certbot python3-certbot-nginx php-cli php-mysql php-redis php-gd php-mbstring php-bcmath php-xml composer nodejs npm docker.io
 
-# Install MariaDB, Redis, PHP, Composer, Nginx
-apt install -y mariadb-server redis-server nginx certbot python3-certbot-nginx php-cli php-mysql php-gd php-mbstring php-bcmath php-xml composer
+systemctl enable --now mariadb redis-server docker
 
-# Install Docker untuk Wings
-apt install -y docker.io
-systemctl enable --now docker
+# ======================
+# COPY FILE DARI VPS LAMA
+# ======================
+echo ">>> Copy file dari VPS lama..."
+sshpass -p "$OLD_PASS" rsync -avz -e "ssh -o StrictHostKeyChecking=no" $OLD_USER@$OLD_IP:/var/www/pterodactyl /var/www/
+sshpass -p "$OLD_PASS" rsync -avz -e "ssh -o StrictHostKeyChecking=no" $OLD_USER@$OLD_IP:/etc/pterodactyl /etc/
+sshpass -p "$OLD_PASS" rsync -avz -e "ssh -o StrictHostKeyChecking=no" $OLD_USER@$OLD_IP:/var/lib/pterodactyl /var/lib/
 
-# === FIREWALL ===
-ufw allow ssh
-ufw allow http
-ufw allow https
-ufw --force enable
+# ======================
+# RESTORE DATABASE
+# ======================
+echo ">>> Backup database dari VPS lama..."
+sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP "mysqldump -u root panel > /root/panel.sql"
 
-# === FIX NGINX DEFAULT ===
-mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-cat > /etc/nginx/sites-available/default <<EOF
-server {
-    listen 80 default_server;
-    server_name _;
-    root /var/www/html;
-    index index.html;
-}
+echo ">>> Copy database ke VPS baru..."
+sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/panel.sql /root/panel.sql
+
+echo ">>> Import database ke MariaDB..."
+mysql -u root <<EOF
+DROP DATABASE IF EXISTS panel;
+CREATE DATABASE panel;
+SOURCE /root/panel.sql;
 EOF
-ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
-nginx -t && systemctl restart nginx
 
-# === SETUP DATABASE ===
-systemctl enable --now mariadb
-mysql -u root <<MYSQL_SCRIPT
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_PASS}';
-FLUSH PRIVILEGES;
-CREATE DATABASE IF NOT EXISTS panel;
-MYSQL_SCRIPT
-
-# === AMBIL FILE DARI VPS LAMA ===
-echo "=== Migrasi file dari VPS lama ==="
-sshpass -p "${OLD_PASS}" rsync -avz -e ssh ${OLD_USER}@${OLD_IP}:/var/www/pterodactyl/ /var/www/pterodactyl/
-sshpass -p "${OLD_PASS}" rsync -avz -e ssh ${OLD_USER}@${OLD_IP}:/etc/pterodactyl/ /etc/pterodactyl/ || true
-
-# === AMBIL DATABASE DARI VPS LAMA ===
-sshpass -p "${OLD_PASS}" ssh ${OLD_USER}@${OLD_IP} "mysqldump -u root panel --password=${MYSQL_PASS}" > /tmp/panel.sql
-mysql -u root -p${MYSQL_PASS} panel < /tmp/panel.sql
-
-# === SETUP .ENV JIKA HILANG ===
-if [ ! -f /var/www/pterodactyl/.env ]; then
-cat > /var/www/pterodactyl/.env <<EOF
-APP_ENV=production
-APP_DEBUG=false
-APP_URL=https://${NEW_DOMAIN}
-APP_TIMEZONE=Asia/Jakarta
-
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_DATABASE=panel
-DB_USERNAME=root
-DB_PASSWORD=${MYSQL_PASS}
-
-CACHE_DRIVER=redis
-SESSION_DRIVER=redis
-QUEUE_DRIVER=redis
-
-REDIS_HOST=127.0.0.1
-REDIS_PASSWORD=null
-REDIS_PORT=6379
-EOF
-fi
-
+# ======================
+# FIX PERMISSIONS
+# ======================
 chown -R www-data:www-data /var/www/pterodactyl
-cd /var/www/pterodactyl && composer install --no-dev --optimize-autoloader
+chmod -R 755 /var/www/pterodactyl
 
-# === SETUP NGINX UNTUK PANEL ===
+# ======================
+# NGINX CONFIG
+# ======================
+echo ">>> Setup Nginx..."
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+
 cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
 server {
     listen 80;
-    server_name ${NEW_DOMAIN};
+    server_name $PANEL_DOMAIN;
 
     root /var/www/pterodactyl/public;
     index index.php;
@@ -105,9 +75,13 @@ server {
 
     location ~ \.php\$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
+        fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
+    }
+
+    location ~ /\.ht {
+        deny all;
     }
 }
 EOF
@@ -115,11 +89,28 @@ EOF
 ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
 nginx -t && systemctl restart nginx
 
-# === SSL LETSENCRYPT ===
-certbot --nginx -d ${NEW_DOMAIN} --non-interactive --agree-tos -m admin@${NEW_DOMAIN}
+# ======================
+# SSL CERTIFICATE
+# ======================
+echo ">>> Pasang SSL Let's Encrypt..."
+certbot --nginx -d $PANEL_DOMAIN -d $NODE_DOMAIN --non-interactive --agree-tos -m admin@$PANEL_DOMAIN || true
 
-# === SETUP WINGS ===
-mkdir -p /etc/pterodactyl
+# ======================
+# ARTISAN SETUP
+# ======================
+cd /var/www/pterodactyl
+composer install --no-dev -o
+php artisan key:generate --force
+php artisan migrate --force
+php artisan config:cache
+php artisan route:cache
+php artisan view:cache
+
+# ======================
+# WINGS SETUP
+# ======================
+echo ">>> Setup Wings..."
+mkdir -p /etc/pterodactyl /var/lib/pterodactyl
 curl -L https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64 -o /usr/local/bin/wings
 chmod +x /usr/local/bin/wings
 
@@ -133,10 +124,12 @@ Requires=docker.service
 User=root
 WorkingDirectory=/etc/pterodactyl
 LimitNOFILE=4096
+PIDFile=/var/run/wings.pid
 ExecStart=/usr/local/bin/wings
 Restart=on-failure
 StartLimitInterval=180
 StartLimitBurst=30
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
@@ -144,6 +137,6 @@ EOF
 
 systemctl enable --now wings
 
-echo "=== Migrasi selesai! ==="
-echo "Login panel di: https://${NEW_DOMAIN}"
-echo "MySQL root password: ${MYSQL_PASS}"
+echo "=== MIGRASI SELESAI 🎉 ==="
+echo "Panel: https://$PANEL_DOMAIN"
+echo "Node:  https://$NODE_DOMAIN"
