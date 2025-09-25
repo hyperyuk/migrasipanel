@@ -1,172 +1,112 @@
 #!/bin/bash
-# =====================================================
-# Auto Install & Migrasi Pterodactyl Panel + Node (Wings)
-# Tested on Ubuntu 20.04/22.04
-# =====================================================
 
-# Pastikan dijalankan sebagai root
-if [ "$EUID" -ne 0 ]; then
-  echo "Harus dijalankan sebagai root"
-  exit
-fi
+echo "=== Migrasi Pterodactyl Panel & Wings ==="
 
-# Input sederhana
-read -p "Masukkan domain untuk panel (contoh: panel.domain.com): " PANEL_DOMAIN
-read -p "Masukkan email admin untuk Let's Encrypt: " ADMIN_EMAIL
-read -p "Masukkan IP server (untuk wings node): " NODE_IP
-
-# Opsi migrasi Wings dari VPS lama
-read -p "Apakah ingin copy Wings config + data dari VPS lama? (y/n): " COPY_WINGS
-
-if [ "$COPY_WINGS" == "y" ]; then
-    read -p "Masukkan IP VPS lama: " OLD_IP
-    read -p "Masukkan user SSH VPS lama (default: root): " OLD_USER
-    OLD_USER=${OLD_USER:-root}
-fi
+# Input
+read -p "Masukkan IP VPS Lama: " OLD_IP
+read -p "Masukkan Username VPS Lama (default: root): " OLD_USER
+OLD_USER=${OLD_USER:-root}
+read -sp "Masukkan Password VPS Lama: " OLD_PASS
+echo
+read -p "Masukkan Domain Panel Baru (atau lama): " PANEL_DOMAIN
+read -p "Masukkan Domain Node Baru (atau lama): " NODE_DOMAIN
 
 # Update sistem
-echo "[+] Update sistem..."
 apt update -y && apt upgrade -y
+apt install -y sshpass rsync curl gnupg2 ca-certificates lsb-release software-properties-common unzip
 
-# Install dependensi dasar
-echo "[+] Install dependensi..."
-apt install -y software-properties-common curl apt-transport-https ca-certificates gnupg unzip git ufw rsync
+echo "[1/5] Backup data & database dari VPS Lama..."
+sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP "mysqldump -u root -p --all-databases > /root/panel_db.sql"
+sshpass -p "$OLD_PASS" rsync -avz --progress $OLD_USER@$OLD_IP:/var/www/pterodactyl/ /root/panel_files/
+sshpass -p "$OLD_PASS" rsync -avz --progress $OLD_USER@$OLD_IP:/etc/pterodactyl/ /root/wings_config/
+sshpass -p "$OLD_PASS" rsync -avz --progress $OLD_USER@$OLD_IP:/root/panel_db.sql /root/
 
-# Install MariaDB, Redis, PHP, Composer, Nginx, NodeJS, Certbot
-echo "[+] Install MariaDB, Redis, PHP, Nginx, NodeJS..."
-apt install -y mariadb-server redis-server nginx certbot python3-certbot-nginx
+echo "[2/5] Install dependency di VPS baru..."
+# MariaDB
+apt install -y mariadb-server mariadb-client
+systemctl enable --now mariadb
 
-# PHP repo
-LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
-apt update
-apt install -y php8.1 php8.1-{cli,gd,mysql,pdo,mbstring,tokenizer,bcmath,xml,curl,zip,fpm}
+# PHP + ext
+apt install -y php8.2 php8.2-cli php8.2-gd php8.2-mysql php8.2-mbstring php8.2-bcmath php8.2-xml php8.2-curl php8.2-zip composer unzip tar
 
-# Install Composer & NodeJS
-curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
+# Redis
+apt install -y redis-server
+
+# NodeJS terbaru
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 
-# Setup database
-echo "[+] Membuat database pterodactyl..."
-DB_PASS=$(openssl rand -base64 12)
-DB_USER=ptero
-DB_NAME=pterodb
+# Nginx
+apt install -y nginx certbot python3-certbot-nginx
 
-mysql -u root <<MYSQL_SCRIPT
-CREATE DATABASE ${DB_NAME};
-CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'127.0.0.1' WITH GRANT OPTION;
-FLUSH PRIVILEGES;
-MYSQL_SCRIPT
-
-echo "Database: ${DB_NAME}, User: ${DB_USER}, Password: ${DB_PASS}" > /root/pterodactyl_db.txt
-
-# Install panel
-echo "[+] Install Pterodactyl Panel..."
+echo "[3/5] Restore database & file..."
+mysql < /root/panel_db.sql
 mkdir -p /var/www/pterodactyl
-cd /var/www/pterodactyl
-curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
-tar -xzvf panel.tar.gz && rm panel.tar.gz
-cp .env.example .env
+rsync -av /root/panel_files/ /var/www/pterodactyl/
+chown -R www-data:www-data /var/www/pterodactyl
 
-composer install --no-dev --optimize-autoloader
-php artisan key:generate --force
+# Restore wings config
+mkdir -p /etc/pterodactyl
+rsync -av /root/wings_config/ /etc/pterodactyl/
 
-# Konfigurasi .env otomatisised
-sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
-sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
-sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=${DB_PASS}/" .env
-
-# Migrasi database
-php artisan migrate --seed --force
-
-# Permission
-chown -R www-data:www-data /var/www/pterodactyl/*
-
-# Konfigurasi Nginx
-cat > /etc/nginx/sites-available/pterodactyl.conf <<EOL
+echo "[4/5] Konfigurasi Nginx + SSL..."
+cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
 server {
     listen 80;
-    server_name ${PANEL_DOMAIN};
-    root /var/www/pterodactyl/public;
+    server_name $PANEL_DOMAIN;
 
+    root /var/www/pterodactyl/public;
     index index.php;
+
+    access_log /var/log/nginx/pterodactyl.access.log;
+    error_log  /var/log/nginx/pterodactyl.error.log;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
     location ~ \.php\$ {
-        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_index index.php;
     }
 
-    location ~ /\.(?!well-known).* {
+    location ~ /\.ht {
         deny all;
     }
 }
-EOL
+EOF
 
 ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 
-# SSL Let's Encrypt
-echo "[+] Setup SSL..."
-certbot --nginx -d ${PANEL_DOMAIN} --non-interactive --agree-tos -m ${ADMIN_EMAIL}
+# SSL
+certbot --nginx -d $PANEL_DOMAIN -n --agree-tos --register-unsafely-without-email
 
-# Install Wings (Node)
-echo "[+] Install Wings Node..."
-mkdir -p /etc/pterodactyl
-curl -Lo /usr/local/bin/wings https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64
-chmod +x /usr/local/bin/wings
-
-# Systemd service untuk wings
-cat > /etc/systemd/system/wings.service <<EOL
+echo "[5/5] Setup Wings service..."
+cat > /etc/systemd/system/wings.service <<EOF
 [Unit]
 Description=Pterodactyl Wings Daemon
-After=network.target
+After=docker.service
+Requires=docker.service
 
 [Service]
 User=root
 WorkingDirectory=/etc/pterodactyl
-ExecStart=/usr/local/bin/wings
+LimitNOFILE=4096
+PIDFile=/var/run/wings.pid
+ExecStart=/usr/bin/wings
 Restart=on-failure
-StartLimitInterval=180
-StartLimitBurst=30
+StartLimitInterval=600
 
 [Install]
 WantedBy=multi-user.target
-EOL
+EOF
 
+systemctl daemon-reload
 systemctl enable --now wings
 
-# Migrasi Wings dari VPS lama (jika dipilih)
-if [ "$COPY_WINGS" == "y" ]; then
-    echo "[+] Copy config.yml dari VPS lama..."
-    rsync -avz ${OLD_USER}@${OLD_IP}:/etc/pterodactyl/config.yml /etc/pterodactyl/config.yml
-
-    echo "[+] Copy data server (bisa agak lama tergantung ukuran)..."
-    rsync -avz --progress ${OLD_USER}@${OLD_IP}:/var/lib/pterodactyl/ /var/lib/pterodactyl/
-
-    chown -R root:root /etc/pterodactyl /var/lib/pterodactyl
-    systemctl restart wings
-    echo "[+] Migrasi Wings selesai, data sudah dipindahkan."
-fi
-
-# UFW rules
-echo "[+] Konfigurasi firewall..."
-ufw allow OpenSSH
-ufw allow 80
-ufw allow 443
-ufw allow 8080
-ufw allow 2022
-ufw --force enable
-
-# Selesai
-echo "=============================================="
-echo "Pterodactyl Panel selesai diinstall!"
-echo "URL: https://${PANEL_DOMAIN}"
-echo "Database info tersimpan di: /root/pterodactyl_db.txt"
-echo "Node (Wings) berjalan di IP: ${NODE_IP}"
+echo "=== Migrasi selesai! ==="
+echo "Panel: https://$PANEL_DOMAIN"
+echo "Node: https://$NODE_DOMAIN"
