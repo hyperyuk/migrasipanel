@@ -1,10 +1,5 @@
 #!/usr/bin/env expect
 
-# ========================================
-# 🚀 Installer Pterodactyl Panel + Wings (Smart Auto Answer)
-# by RissXD
-# ========================================
-
 set timeout -1
 
 # === Input manual dari user ===
@@ -43,8 +38,7 @@ send_user "Disk Node    : $DISK_NODE MB\n"
 send_user "===================================\n\n"
 
 # === Jalankan installer panel ===
-spawn bash <(curl -s https://pterodactyl-installer.se)
-
+spawn bash -c "curl -s https://pterodactyl-installer.se | bash"
 expect {
     "Input 0-6" { send "0\r"; exp_continue }
     "(y/N)" { send "y\r"; exp_continue }
@@ -72,7 +66,7 @@ expect {
 }
 
 # === Install Wings ===
-spawn bash <(curl -s https://raw.githubusercontent.com/SkyzoOffc/Pterodactyl-Theme-Autoinstaller/main/createnode.sh)
+spawn bash -c "curl -s https://raw.githubusercontent.com/SkyzoOffc/Pterodactyl-Theme-Autoinstaller/main/createnode.sh | bash"
 expect {
     "Masukkan nama lokasi" { send "Singapore\r"; exp_continue }
     "deskripsi lokasi" { send "Node By RissXD\r"; exp_continue }
