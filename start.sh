@@ -1,120 +1,90 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env expect
 
-echo "=== Pterodactyl Auto Migration Script ==="
+# ========================================
+# 🚀 Installer Pterodactyl Panel + Wings (Smart Auto Answer)
+# by RissXD
+# ========================================
 
-# === INPUT ===
-read -p "IP VPS Lama: " OLD_IP
-read -p "User VPS Lama (default: root): " OLD_USER
-OLD_USER=${OLD_USER:-root}
-read -sp "Password VPS Lama: " OLD_PASS
-echo
-read -p "Domain Panel Baru (contoh: panel.domain.com): " PANEL_DOMAIN
-read -p "Domain Node Baru (contoh: node.domain.com): " NODE_DOMAIN
+set timeout -1
 
-# === UPDATE VPS BARU ===
-echo "[1/8] Update & install dependencies..."
-apt update -y
-apt upgrade -y
-apt install -y curl wget git unzip tar lsb-release apt-transport-https software-properties-common gnupg2 \
-    mariadb-server mariadb-client redis-server certbot python3-certbot-nginx composer nodejs npm \
-    php-cli php-mysql php-gd php-mbstring php-bcmath php-xml php-curl php-zip php-fpm php-intl \
-    nginx sshpass docker.io
+# === Input manual dari user ===
+send_user "🌐 Masukkan Domain Panel (contoh: panel.example.com): "
+expect_user -re "(.*)\n"
+set DOMAIN_PANEL $expect_out(1,string)
 
-systemctl enable --now mariadb redis-server docker
+send_user "🌐 Masukkan Domain Node (contoh: node.example.com): "
+expect_user -re "(.*)\n"
+set DOMAIN_NODE $expect_out(1,string)
 
-# === BACKUP DARI VPS LAMA ===
-echo "[2/8] Backup dari VPS lama..."
-sshpass -p "$OLD_PASS" ssh -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP "mysqldump -u root panel > /root/panel.sql"
-sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no $OLD_USER@$OLD_IP:/root/panel.sql /root/panel.sql
-sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no -r $OLD_USER@$OLD_IP:/var/www/pterodactyl /root/pterodactyl_old
-sshpass -p "$OLD_PASS" scp -o StrictHostKeyChecking=no -r $OLD_USER@$OLD_IP:/etc/pterodactyl /root/wings_old || true
+send_user "💾 Masukkan RAM Node (MB) [default 8192]: "
+expect_user -re "(.*)\n"
+set RAM_NODE $expect_out(1,string)
+if { $RAM_NODE eq "" } { set RAM_NODE 8192 }
 
-# === RESTORE DATABASE ===
-echo "[3/8] Restore database..."
-mysql -u root -e "CREATE DATABASE IF NOT EXISTS panel;"
-mysql -u root panel < /root/panel.sql
+send_user "💽 Masukkan Disk Node (MB) [default 100000]: "
+expect_user -re "(.*)\n"
+set DISK_NODE $expect_out(1,string)
+if { $DISK_NODE eq "" } { set DISK_NODE 100000 }
 
-# === RESTORE FILES ===
-echo "[4/8] Restore panel files..."
-rm -rf /var/www/pterodactyl
-cp -r /root/pterodactyl_old /var/www/pterodactyl
-chown -R www-data:www-data /var/www/pterodactyl
-chmod -R 755 /var/www/pterodactyl
+# === Admin otomatis ===
+set ADMIN_USER "admin"
+set ADMIN_PASS "admin1"
+set ADMIN_EMAIL "admin@${DOMAIN_PANEL}"
 
-# === SETUP COMPOSER & ARTISAN ===
-echo "[5/8] Setup composer & artisan..."
-cd /var/www/pterodactyl
-composer install --no-dev --optimize-autoloader
-npm install --production
-php artisan key:generate --force || true
-php artisan migrate --force
-php artisan config:cache
-php artisan view:cache
-php artisan route:cache
+send_user "\n===================================\n"
+send_user "🚀 Mulai Install dengan data berikut:\n"
+send_user "Panel Domain : $DOMAIN_PANEL\n"
+send_user "Node Domain  : $DOMAIN_NODE\n"
+send_user "Admin Email  : $ADMIN_EMAIL\n"
+send_user "Admin User   : $ADMIN_USER\n"
+send_user "Admin Pass   : $ADMIN_PASS\n"
+send_user "RAM Node     : $RAM_NODE MB\n"
+send_user "Disk Node    : $DISK_NODE MB\n"
+send_user "===================================\n\n"
 
-# === SETUP NGINX + SSL ===
-echo "[6/8] Setup Nginx & SSL..."
-cat > /etc/nginx/sites-available/pterodactyl <<EOF
-server {
-    listen 80;
-    server_name $PANEL_DOMAIN;
-    root /var/www/pterodactyl/public;
+# === Jalankan installer panel ===
+spawn bash <(curl -s https://pterodactyl-installer.se)
 
-    index index.php;
-    charset utf-8;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-
-    location ~ /\.ht {
-        deny all;
-    }
+expect {
+    "Input 0-6" { send "0\r"; exp_continue }
+    "(y/N)" { send "y\r"; exp_continue }
+    "Database name" { send "\r"; exp_continue }
+    "Database username" { send "$ADMIN_USER\r"; exp_continue }
+    "Password (press enter" { send "$ADMIN_PASS\r"; exp_continue }
+    "timezone" { send "Asia/Jakarta\r"; exp_continue }
+    "email address" { send "$ADMIN_EMAIL\r"; exp_continue }
+    "Username for the initial" { send "$ADMIN_USER\r"; exp_continue }
+    "First name" { send "Admin\r"; exp_continue }
+    "Last name" { send "Panel\r"; exp_continue }
+    "Password for the initial" { send "$ADMIN_PASS\r"; exp_continue }
+    "FQDN of this panel" { send "$DOMAIN_PANEL\r"; exp_continue }
+    "configure UFW" { send "y\r"; exp_continue }
+    "configure HTTPS" { send "y\r"; exp_continue }
+    "appropriate number" { send "1\r"; exp_continue }
+    "I agree that this HTTPS" { send "y\r"; exp_continue }
+    "Proceed anyways" { send "y\r"; exp_continue }
+    "(yes/no)" { send "y\r"; exp_continue }
+    "Continue with installation?" { send "y\r"; exp_continue }
+    "Still assume SSL?" { send "y\r"; exp_continue }
+    "Terms of Service" { send "y\r"; exp_continue }
+    "(A)gree/(C)ancel" { send "A\r"; exp_continue }
+    eof
 }
-EOF
 
-ln -sf /etc/nginx/sites-available/pterodactyl /etc/nginx/sites-enabled/pterodactyl
-nginx -t && systemctl restart nginx
-certbot --nginx -d $PANEL_DOMAIN -d $NODE_DOMAIN --non-interactive --agree-tos -m admin@$PANEL_DOMAIN || true
+# === Install Wings ===
+spawn bash <(curl -s https://raw.githubusercontent.com/SkyzoOffc/Pterodactyl-Theme-Autoinstaller/main/createnode.sh)
+expect {
+    "Masukkan nama lokasi" { send "Singapore\r"; exp_continue }
+    "deskripsi lokasi" { send "Node By RissXD\r"; exp_continue }
+    "Masukkan domain" { send "$DOMAIN_NODE\r"; exp_continue }
+    "nama node" { send "Node By RissXD\r"; exp_continue }
+    "RAM" { send "$RAM_NODE\r"; exp_continue }
+    "disk space" { send "$DISK_NODE\r"; exp_continue }
+    "Locid" { send "1\r"; exp_continue }
+    eof
+}
 
-# === RESTORE WINGS ===
-echo "[7/8] Restore wings..."
-mkdir -p /etc/pterodactyl
-if [ -d "/root/wings_old" ]; then
-    cp -r /root/wings_old/* /etc/pterodactyl/
-fi
-
-cat > /etc/systemd/system/wings.service <<EOF
-[Unit]
-Description=Pterodactyl Wings Daemon
-After=docker.service
-Requires=docker.service
-
-[Service]
-User=root
-WorkingDirectory=/etc/pterodactyl
-ExecStart=/usr/local/bin/wings
-Restart=on-failure
-LimitNOFILE=4096
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now wings || true
-
-# === DONE ===
-echo "[8/8] Migration Selesai!"
-echo "Panel URL: https://$PANEL_DOMAIN"
-echo "Node URL: https://$NODE_DOMAIN"
-echo "Login dengan akun admin lama atau buat baru via:"
-echo "cd /var/www/pterodactyl && php artisan p:user:make"
+send_user "\n✅ Install selesai!\n"
+send_user "🌐 Panel: https://$DOMAIN_PANEL\n"
+send_user "👤 User : $ADMIN_USER\n"
+send_user "🔐 Pass : $ADMIN_PASS\n"
